@@ -63,6 +63,8 @@ FIL fil;	//-->>objeto com estrutura do tipo filer (arquivo)
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+ADC_HandleTypeDef hadc1;
+
 I2C_HandleTypeDef hi2c1;
 
 SPI_HandleTypeDef hspi2;
@@ -82,12 +84,13 @@ float Ax, Ay, Az;
 
 //-->VARIAVEIS DE ESTADO PARA VERIFICAÇÃO
 volatile uint8_t exibir_mpu = FALSO;
-volatile uint8_t display_inicializado = FALSO;
+volatile uint8_t inicializado = FALSO;
 volatile uint8_t gravacao_inicializada = FALSO;
 volatile uint8_t gravar_display = FALSO;
 volatile uint8_t gravar_sd = FALSO;
 volatile uint8_t mudar_arquivo = FALSO;
 volatile uint8_t ler_mpu = FALSO;
+volatile uint8_t ler_temp = FALSO;
 volatile uint8_t enviar_para_esp8266 = FALSO;
 
 GPIO_PinState estado_botao;
@@ -110,6 +113,8 @@ volatile uint32_t TICKS_VELA = 0;
 volatile uint32_t TIM2_C3_OVC = 0;
 volatile uint32_t FREQUENCIA_VELA = 0;
 
+volatile uint16_t TEMPERATURA = 0;
+
 //-->> VARI�?VEIS PARA A VELOCIDADE
 volatile float VELOCIDADE = 0;
 volatile float VELOCIDADE_MAX = 0;
@@ -120,13 +125,16 @@ volatile uint8_t indice_arquivo = 1;
 int i;
 volatile uint8_t contagem_vetor = 0;
 volatile uint8_t contagem_sd = 0;
-volatile uint8_t contagem_display = 0;
+volatile uint8_t contagem_display = 1; //iniciar em 1 (1*20 = 20ms adiantado)
 volatile uint8_t contagem_botao = 0;
-volatile uint16_t contagem_mpu = 5; //iniciar em 5 (5*10 = 50ms adiantado) para leitura do mpu6050 não coincidir com gravação em cartão sd
+volatile uint16_t contagem_esp8266 = 2; //iniciar em 2 (2*20 = 40ms adiantado)
 volatile uint8_t tempo_pressionado = 0;
-volatile uint8_t contagem_esp8266 = 0;
+volatile uint8_t contagem_mpu = 3; //iniciar em 3 (3*20 = 60ms adiantado)
+volatile uint8_t contagem_temp = 4; //iniciar em 4 (4*20 = 80ms adiantado)
 volatile uint32_t tempo_entre_interrupcoes_ind = 0;
 volatile uint32_t tempo_entre_interrupcoes_vela = 0;
+
+//Os adiantamentos é para reduzir o número de tarefas simultâneas, mas mantendo os intervalos definidos
 
 //-->> VARI�?VEIS PARA A MARCAÇÃO DO TEMPO
 volatile uint16_t mseg = 0;
@@ -134,10 +142,10 @@ volatile uint8_t seg = 0;
 volatile uint8_t min = 0;
 volatile uint8_t horas = 0;
 
-//-->> VARI�?VEIS PARA O DESENHO DA BARRA DE VELOCIDADE
+//-->> VARI�?VEIS PARA O DESENHO DA BARRA DE RPM
 int unidades_da_barra = 0;
 char simbolo_barra[2];
-char barra_velocidade[20];
+char barra_rpm[20];
 
 //-->> STRING PARA NOME DO ARQUIVO SALVO
 char nome_arquivo[50];
@@ -147,7 +155,13 @@ char dado_atual[50];
 char dados[500] = {};
 char dados_sd[500] = {};
 char dados_display[21];
-char uart_dados[70] = 	{};
+char uart_dados[30] = 	{};
+
+// caracteres display
+uint8_t termometro[8] = {0x06, 0x04, 0x06, 0x04, 0x06, 0x04, 0x0E, 0x0E};
+uint8_t tracoEsq[8] = {0x10, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+uint8_t tracoGrandeEsq[8] = {0x10, 0x10, 0x10, 0x10, 0x00, 0x00, 0x00, 0x00};
+uint8_t espaco[8] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
 /* USER CODE END PV */
 
@@ -159,6 +173,7 @@ static void MX_I2C1_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_SPI2_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -213,6 +228,30 @@ void MPU6050_Read_Accel (void)
 	Az = Accel_Z_RAW/16384.0;
 }
 
+//Função para criar characteres
+void salvar_characteres(void){
+	  // Salva chars no CGRAM
+	  lcd_send_cmd(0x40);
+	  for (int i=0; i<8; i++) lcd_send_data(termometro[i]);
+
+	  lcd_send_cmd(0x40+8);
+	  for (int i=0; i<8; i++) lcd_send_data(tracoEsq[i]);
+
+	  lcd_send_cmd(0x40+16);
+	  for (int i=0; i<8; i++) lcd_send_data(tracoGrandeEsq[i]);
+
+	  lcd_send_cmd(0x40+24);
+	  for (int i=0; i<8; i++) lcd_send_data(espaco[i]);
+
+	  /*lcd_send_cmd(0x40+32);
+	  for (int i=0; i<8; i++) lcd_send_data(cc5[i]);
+
+	  lcd_send_cmd(0x40+40);
+	  for (int i=0; i<8; i++) lcd_send_data(cc6[i]);
+
+	  lcd_send_cmd(0x40+48);
+	  for (int i=0; i<8; i++) lcd_send_data(cc7[i]);*/
+}
 /* USER CODE END 0 */
 
 /**
@@ -249,13 +288,17 @@ int main(void)
   MX_SPI2_Init();
   MX_FATFS_Init();
   MX_USART1_UART_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
 
   //-->> DEFINE O SIMBOLO DA BARRA DE VELOCIDADE COMO UM QUADRADO PREENCHIDO
   sprintf(simbolo_barra,"%c",255);
 
+
   //-->> INICIALIZAÇÃO DO DISPLAY LCD DO BAJA
   lcd_init();
+
+  salvar_characteres();
 
   lcd_send_cmd (0x80|0x00);
   lcd_send_string("VITORIA BAJA - 2023");
@@ -269,11 +312,11 @@ int main(void)
   lcd_send_cmd (0x80|0x54);
   lcd_send_string(" ");
 
-  //-->> INICIALIZAÇÃO DO MÓDULO MPU6050
-  MPU6050_Init ();
-
   //-->> ATRASO
   HAL_Delay(2000);
+
+  //-->> INICIALIZAÇÃO DO MÓDULO MPU6050
+  MPU6050_Init ();
 
   //-->MONTAGEM DO CARTÃO SD
   f_mount(&fs, "", 0);
@@ -281,11 +324,11 @@ int main(void)
   //-->>CRIAÇÃO/ABERTURA DO ARQUIVO QUE RECEBERAO OS DADOS
   f_open(&fil, "dados_placa_central_1.txt", FA_OPEN_ALWAYS | FA_WRITE | FA_READ);
   f_lseek(&fil, fil.fsize);
-  f_puts("Inicializando Gravação de Dados...\n\nTEMPO\t-->\tRPM_DISCO\tRPM_VELA\tAx\tAy\tAz\n\n", &fil);
+  f_puts("Inicializando Gravação de Dados...\n\nTEMPO\t-->\tVELOCIDADE\tRPM_VELA\tTEMPERATURA\tAx\tAy\tAz\n\n", &fil);
   f_close(&fil);
 
   //-->>VERIFICAR SE ESTA VARI�?VEL AINDA É NECESS�?RIA
-  display_inicializado = VERDADEIRO;
+  inicializado = VERDADEIRO;
 
   //-->> LIMPAR DISPLAY
   lcd_clear();
@@ -298,6 +341,9 @@ int main(void)
   //-->>INICIALIZAÇÃO DO TIM3
   HAL_TIM_Base_Start_IT(&htim3);
 
+  //-->>INICIALIZAÇÃO DA CALIBRAÇÃO ADC
+  HAL_ADCEx_Calibration_Start(&hadc1);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -305,6 +351,13 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
+	  	if(ler_temp == VERDADEIRO){
+	  		HAL_ADC_Start(&hadc1);
+	  		HAL_ADC_PollForConversion(&hadc1, 1);
+	  		TEMPERATURA = HAL_ADC_GetValue(&hadc1)*0.0807;
+	  		ler_temp = FALSO;
+	  	}
+
 		//-->> GRAVAÇÃO DOS DADOS SALVOS NO BUFFER NO CARTÃO SD
 		if(gravar_sd == VERDADEIRO && gravacao_inicializada == VERDADEIRO){ 	//só executa se gravação foi inicializada, a após cada intervalo de 100ms
 		  sprintf(nome_arquivo, "dados_placa_central_%i.txt",indice_arquivo);
@@ -322,16 +375,20 @@ int main(void)
 
 		//-->>ENVIA DADOS DO BUFFER PARA ESP8266 VIA COMUNICAÇÃO UART
 		if(enviar_para_esp8266 == VERDADEIRO){
-	    	sprintf(uart_dados, "{\"vel\":%.2f,\"rpm\":%lu,\"temp\": 0,\"Ax\":%.2f,\"Ay\":%.2f,\"Az\":%.2f}",VELOCIDADE,FREQUENCIA_VELA,Ax,Ay,Az); //Copia dado atual para telemetria
+	    	sprintf(uart_dados, "%.2f,%lu,%i,%.2f,%.2f,%.2f",VELOCIDADE,FREQUENCIA_VELA,TEMPERATURA,Ax,Ay,Az); //Copia dado atual para telemetria
 			HAL_UART_Transmit(&huart1, (uint8_t *)uart_dados, sizeof(uart_dados), 200);
 			enviar_para_esp8266 = FALSO;
 		}
 
 		//-->> ENVIA STRINGS COM DADOS PARA O DISPLAY
 		if(gravar_display == VERDADEIRO){
-			HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_4);
+	    	unidades_da_barra = FREQUENCIA_VELA/220; //atualiza o tamanho da barra de velocidade
+			if (unidades_da_barra > 20){ //Não pode passar de 20 barras
+				unidades_da_barra = 20;
+			}
+
 			lcd_clear();
-			if(exibir_mpu == VERDADEIRO){ // Exibir acelerometro
+			if(exibir_mpu == VERDADEIRO){ // Exibir dados do mpu6050
 
 				sprintf(dados_display, "  Ax     Ay     Az ");
 
@@ -343,34 +400,87 @@ int main(void)
 				lcd_send_string(dados_display);
 			}
 
-			else{ //exibir velocidade
+			else{ //Exibe os dados principais
 
-				sprintf(dados_display, "V: %.2f km/h  ", VELOCIDADE);
-				lcd_send_cmd (0x80|0x00);
+				//Printa velocidade
+				sprintf(dados_display, "%.2f", VELOCIDADE);
+				lcd_send_cmd (0x80|0x1F);
+				lcd_send_string(dados_display);
+				lcd_send_cmd (0x80|0x24);
+				lcd_send_string("Km/h");
+
+				//printa RPM do motor
+				sprintf(dados_display, "%lu", FREQUENCIA_VELA);
+				lcd_send_cmd (0x80|0x50);
 				lcd_send_string(dados_display);
 
+				//Printa escala do RPM
+				lcd_send_cmd (0x80|0x41);
+				lcd_send_data(3);
+				lcd_send_cmd (0x80|0x42);
+				lcd_send_data(1);
+				lcd_send_cmd (0x80|0x43);
+				lcd_send_data(3);
+				lcd_send_cmd (0x80|0x44);
+				lcd_send_data(2);
+
+				lcd_send_cmd (0x80|0x45);
+				lcd_send_data(3);
+				lcd_send_cmd (0x80|0x46);
+				lcd_send_data(1);
+				lcd_send_cmd (0x80|0x47);
+				lcd_send_data(3);
+				lcd_send_cmd (0x80|0x48);
+				lcd_send_data(2);
+
+				lcd_send_cmd (0x80|0x49);
+				lcd_send_data(3);
+				lcd_send_cmd (0x80|0x4A);
+				lcd_send_data(1);
+				lcd_send_cmd (0x80|0x4B);
+				lcd_send_data(3);
+				lcd_send_cmd (0x80|0x4C);
+				lcd_send_data(2);
+
+				lcd_send_cmd (0x80|0x4D);
+				lcd_send_data(3);
+				lcd_send_cmd (0x80|0x4E);
+				lcd_send_data(1);
+				lcd_send_cmd (0x80|0x4F);
+				lcd_send_data(3);
+
+
+				//Printa o tacometro em barra de rpm
 				i = 0;
 				while(i<unidades_da_barra){
-					strcat(barra_velocidade,simbolo_barra);
+					strcat(barra_rpm,simbolo_barra);
 					i++;
 				}
-				lcd_send_cmd (0x80|0x14);
-				lcd_send_string(barra_velocidade);
-				memset(barra_velocidade, 0, sizeof(barra_velocidade));
+				lcd_send_cmd (0x80|0x00);
+				lcd_send_string(barra_rpm);
+				memset(barra_rpm, 0, sizeof(barra_rpm));
 				unidades_da_barra = 0;
 
-				sprintf(dados_display, "RPM_VELA: %lu rpm  ", FREQUENCIA_VELA);
-				lcd_send_cmd (0x80|0x40);
+				//Printa a temperatura
+				sprintf(dados_display, "%d%cC",TEMPERATURA,223);
+				lcd_send_cmd (0x80|0x14);  //printa símbolo do termômetro
+				lcd_send_data(0);
+				lcd_send_cmd (0x80|0x15); //printa a temperatura
 				lcd_send_string(dados_display);
+
 			}
 
+			//Printa o cronômetro
 			if(gravacao_inicializada == VERDADEIRO){
-				sprintf(dados_display, "REC%i   %i:%i:%i:%i   ",indice_arquivo,horas,min,seg,mseg);
+				sprintf(dados_display, "%i:%i:%i:%i",horas,min,seg,mseg);
 				lcd_send_cmd (0x80|0x54);
+				lcd_send_string(dados_display);
+				sprintf(dados_display, "REC%i",indice_arquivo);
+				lcd_send_cmd (0x80|0x64);
 				lcd_send_string(dados_display);
 			}
 			else if (gravacao_inicializada == FALSO){
-				sprintf(dados_display, "      %i:%i:%i:%i   ", horas,min,seg,mseg);
+				sprintf(dados_display, "%i:%i:%i:%i", horas,min,seg,mseg);
 				lcd_send_cmd (0x80|0x54);
 				lcd_send_string(dados_display);
 			}
@@ -391,6 +501,7 @@ void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
 
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
@@ -420,6 +531,59 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC;
+  PeriphClkInit.AdcClockSelection = RCC_ADCPCLK2_DIV6;
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC1_Init(void)
+{
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+
+  /** Common config
+  */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.NbrOfConversion = 1;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
 }
 
 /**
@@ -653,6 +817,9 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4|GPIO_PIN_8, GPIO_PIN_RESET);
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
+
   /*Configure GPIO pins : PA4 PA8 */
   GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_8;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -665,6 +832,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PB8 */
+  GPIO_InitStruct.Pin = GPIO_PIN_8;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
 /* USER CODE END MX_GPIO_Init_2 */
@@ -718,7 +892,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef* htim)
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 {
 
-	if (htim->Instance == TIM2) { // a cada 20 ms
+	if (htim->Instance == TIM2 && inicializado == VERDADEIRO) { // a cada 20 ms
 		//Contadores para regular eventos:
 	    TIM2_C1_OVC++;
 		TIM2_C3_OVC++;
@@ -727,9 +901,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 	    contagem_botao++;
 	    contagem_mpu++;
 	    contagem_esp8266++;
+	    contagem_temp++;
 
 	    //String com dados atualizados a cada 20ms (para gravar no cartão sd)
-	    sprintf(dado_atual, "%i:%i:%i:%i\t-->\t%.2f\t%lu\t%.2f\t%.2f\t%.2f\n",horas,min,seg,mseg, VELOCIDADE,FREQUENCIA_VELA,Ax,Ay,Az); // @suppress("Float formatting support")
+	    sprintf(dado_atual, "%i:%i:%i:%i\t-->\t%.2f\t%lu\t%i\t%.2f\t%.2f\t%.2f\n",horas,min,seg,mseg, VELOCIDADE,FREQUENCIA_VELA,TEMPERATURA,Ax,Ay,Az); // @suppress("Float formatting support")
 
 	    //Se a gravação foi inicializada (botão acionado)
 	    if(gravacao_inicializada == VERDADEIRO){
@@ -744,14 +919,19 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 		    }
 	    }
 
-	    if(contagem_esp8266 == 30){ //a cada 1s
+	    if(contagem_esp8266 == 50){ //a cada 1s
 
 	    	enviar_para_esp8266 = VERDADEIRO; //Libera o envio para o esp
 	    	contagem_esp8266 = 0; //reseta a contagem
 
 	    }
 
-	    if(contagem_mpu == 10){ // a cada 200ms
+	    if(contagem_temp == 25){ // a cada 500ms
+		  ler_temp = VERDADEIRO; // Leitura da temperaturra
+	      contagem_temp = 0; //reseta a contagem
+	    }
+
+	    if(contagem_mpu == 15){ // a cada 300ms
 		  MPU6050_Read_Accel(); // Leitura do acelerômetro
 	      contagem_mpu = 0; //reseta a contagem
 	    }
@@ -767,7 +947,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 
 				if(estado_botao == GPIO_PIN_RESET){ //Se o botão foi liberado
 
-					if(tempo_pressionado <= 5){ // se pressionado por menos que 1s
+					if(tempo_pressionado >= 2 && tempo_pressionado <= 10 ){ // se pressionado por menos que 2s
 						if(gravacao_inicializada == FALSO){ //Se a gravação está desativada
 							gravacao_inicializada = VERDADEIRO;  //Gravação é ativada
 							HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_SET);
@@ -776,15 +956,15 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 							gravacao_inicializada = FALSO; //gravação é desativada
 							mudar_arquivo = VERDADEIRO; //Para mudar o arquivo na próxima gravação
 							HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_RESET);
-							//Reseta o cronômetro
-							mseg = 0;
-							seg = 0;
-							min = 0;
-							horas = 0;
 						}
+						//Reseta o cronômetro
+						mseg = 0;
+						seg = 0;
+						min = 0;
+						horas = 0;
 					}
 
-					else if(tempo_pressionado <= 20){ //pressionado por menos que 8s
+					else if(tempo_pressionado >= 20){ //pressionado por 4s
 						exibir_mpu = !exibir_mpu; //Exibe no display dados do acelerômetro
 					}
 
@@ -797,22 +977,16 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 	    	contagem_botao = 0;
 	    }
 
-	    if(contagem_display == 10){ //a cada 200ms
+	    if(contagem_display == 20){ //a cada 400ms
 
-	    	unidades_da_barra = FREQUENCIA_IND/27; //atualiza o tamanho da barra de velocidade
-			if (unidades_da_barra > 20){ //Não pode passar de 20 barras
-				unidades_da_barra = 20;
-			}
 	    	gravar_display = VERDADEIRO; //Libera gravação no display
 	  		contagem_display = 0;
 	    }
 	}
 
-	else if(htim->Instance == TIM3){ // a cada 1ms
-		if(gravacao_inicializada == VERDADEIRO){ //Se gravação inicializada
-
+	else if(htim->Instance == TIM3 && inicializado == VERDADEIRO){ // a cada 5ms
 			//Inicia cronômetro
-			mseg++;
+			mseg = mseg + 5;
 			if(mseg == 1000){
 				seg++;
 				mseg = 0;
@@ -825,18 +999,18 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 				horas++;
 				min = 0;
 			}
-		}
 
 		//Conta o tempo em milissegundos entre a interrupções
-		tempo_entre_interrupcoes_ind++;
-		tempo_entre_interrupcoes_vela++;
+		tempo_entre_interrupcoes_ind= tempo_entre_interrupcoes_ind + 5;
+		tempo_entre_interrupcoes_vela = tempo_entre_interrupcoes_vela + 5;
 
 		//Se passa de 0.5 segundo, zera as velocidades
-		if(tempo_entre_interrupcoes_ind == 501){
+		if(tempo_entre_interrupcoes_ind >= 500){
 			tempo_entre_interrupcoes_ind = 500;
 			FREQUENCIA_IND = 0;
+			VELOCIDADE = 0;
 		}
-		if(tempo_entre_interrupcoes_vela == 501){
+		if(tempo_entre_interrupcoes_vela >= 500){
 			tempo_entre_interrupcoes_vela = 500;
 			FREQUENCIA_VELA = 0;
 		}
